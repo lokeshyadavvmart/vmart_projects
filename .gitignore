@@ -11,6 +11,7 @@ __pycache__/
 venv/
 .env/
 .venv/
+venv/
 env/
 ENV/
 
@@ -69,6 +70,8 @@ media/
 .env.development.local
 .env.test.local
 .env.production.local
+.env
+.env.*
 
 ############################
 # NODE.JS
