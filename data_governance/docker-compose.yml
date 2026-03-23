@@ -1,0 +1,22 @@
+services:
+
+  clickhouse:
+    build:
+      context: ./docker/clickhouse
+
+    container_name: clickhouse
+
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+
+    env_file:
+      - .env
+
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+    restart: unless-stopped
+
+volumes:
+  clickhouse_data:

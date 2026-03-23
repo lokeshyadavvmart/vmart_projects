@@ -144,4 +144,4 @@ ORDER BY
     icode
 """)
 df = pd.DataFrame(result)
-df.to_csv("duplicate_items.csv")
+df.to_csv("color_variants.csv")
