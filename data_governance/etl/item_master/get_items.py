@@ -1,21 +1,21 @@
-# File: etl/item_master/get_items.py
-
 import logging
 import pandas as pd
 from collections import defaultdict
 from rapidfuzz import process, fuzz
-from database.query_executor import get_connection
+
+from database.query_executor import execute_query_dict
 from database.clickhouse_client import get_clickhouse_client
 
 # ----------------------------
-# Config
+# CONFIG
 # ----------------------------
 FETCH_BATCH_SIZE = 5000
 INSERT_BATCH_SIZE = 5000
 FUZZY_THRESHOLD = 90
 CHUNK_SIZE = 500
+ICODE_CHUNK = 1000
 
-FUZZY_EXCLUDE_COLUMNS = {"cname4" , "udfstring09"}
+FUZZY_EXCLUDE_COLUMNS = {"cname4", "udfstring09"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,10 +34,12 @@ REQUIRED_COLUMNS = [
     "lev1grpname",
     "lev2grpname",
     "grpname",
-    "cname1", "cname2", "cname3", "cname4", "cname5", "cname6",
+    "cname1", "cname2", "cname3", "cname4",
+    "cname5", "cname6",
     "shrtname", "udfstring03",
     "udfstring01", "udfstring02", "udfstring04", "udfstring05",
-    "udfstring06", "udfstring07", "udfstring08", "udfstring09", "udfstring10"
+    "udfstring06", "udfstring07", "udfstring08",
+    "udfstring09", "udfstring10"
 ]
 
 META_COLUMNS = [
@@ -55,9 +57,9 @@ FUZZY_COLUMNS = [c for c in META_COLUMNS if c not in FUZZY_EXCLUDE_COLUMNS]
 # ----------------------------
 def clean_value(x):
     if x is None:
-        return ''
+        return ""
     if isinstance(x, float) and pd.isna(x):
-        return ''
+        return ""
     return str(x)
 
 
@@ -69,50 +71,101 @@ def normalize(s):
 # MAIN ETL
 # ----------------------------
 try:
-    logging.info("Starting ETL")
+    logging.info("Starting ETL job...")
 
-    conn = get_connection()
-    cursor = conn.cursor()
+    # ------------------------------------------------
+    # 1) FETCH icodes purchased in last 2 years
+    # ------------------------------------------------
+    logging.info("Fetching icodes purchased in last 2 years...")
 
-    cursor.execute("SELECT COUNT(*) FROM V_ITEM")
-    total_expected = cursor.fetchone()[0]
+    icode_rows = execute_query_dict("""
+        SELECT DISTINCT pd.icode
+        FROM purorddet pd
+        JOIN purordmain pm ON pd.ordcode = pm.ordcode
+        WHERE (pd.ordqty - pd.cnlqty) != 0
+          AND pm.orddt >= ADD_MONTHS(TRUNC(SYSDATE), -24)
+    """)
 
-    cursor.execute(f"SELECT {', '.join(REQUIRED_COLUMNS)} FROM V_ITEM")
+    icodes = [str(r["ICODE"]) for r in icode_rows]
+    logging.info(f"Found {len(icodes)} active icodes in last 2 years")
 
+    # ------------------------------------------------
+    # 2) Fetch filtered V_ITEM rows in chunks
+    # ------------------------------------------------
+    logging.info("Fetching filtered V_ITEM rows...")
+
+    all_rows = []
+    for i in range(0, len(icodes), ICODE_CHUNK):
+        chunk = icodes[i:i + ICODE_CHUNK]
+        chunk_list = ",".join(f"'{c}'" for c in chunk)
+
+        query = f"""
+            SELECT {", ".join(REQUIRED_COLUMNS)}
+            FROM V_ITEM
+            WHERE icode IN ({chunk_list})
+        """
+
+        result = execute_query_dict(query)
+        logging.info(f"Fetched {len(result)} rows for this icode chunk.")
+        all_rows.extend(result)
+
+    logging.info(f"Total fetched rows from V_ITEM: {len(all_rows)}")
+
+    # ------------------------------------------------
+    # ClickHouse setup
+    # ------------------------------------------------
     client = get_clickhouse_client()
 
     ch_table = "governance.v_item_master"
     meta_table = "governance.v_item_master_meta"
     fuzzy_table = "governance.v_item_fuzzy_pairs"
 
-    logging.info("Truncating tables")
+    logging.info("Truncating ClickHouse tables...")
     client.command(f"TRUNCATE TABLE {ch_table}")
     client.command(f"TRUNCATE TABLE {meta_table}")
     client.command(f"TRUNCATE TABLE {fuzzy_table}")
 
-    meta_counter = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int)))))
+    # ------------------------------------------------
+    # Metadata dictionary
+    # ------------------------------------------------
+    meta_counter = defaultdict(lambda: defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    ))
 
+    # ------------------------------------------------
+    # 3) PROCESS IN BATCHES
+    # ------------------------------------------------
     total_rows = 0
-    batch_num = 0
+    from math import ceil
+    total_batches = ceil(len(all_rows) / FETCH_BATCH_SIZE)
 
-    # ----------------------------
-    # LOAD DATA
-    # ----------------------------
-    while True:
-        rows = cursor.fetchmany(FETCH_BATCH_SIZE)
-        if not rows:
-            break
+    for batch_num in range(total_batches):
+        start = batch_num * FETCH_BATCH_SIZE
+        end = start + FETCH_BATCH_SIZE
+        batch = all_rows[start:end]
 
-        batch_num += 1
-        total_rows += len(rows)
+        df = pd.DataFrame(batch)
 
-        df = pd.DataFrame(rows, columns=[c[0].lower() for c in cursor.description])
+        # 1) Make columns lowercase
+        df.columns = [c.lower() for c in df.columns]
+
+        # 2) Add missing columns (Oracle might not return all)
+        for col in REQUIRED_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+
+        # 3) Reorder
         df = df[REQUIRED_COLUMNS]
 
-        cleaned = [[clean_value(v) for v in r] for r in df.itertuples(index=False, name=None)]
+        cleaned = [
+            [clean_value(v) for v in r]
+            for r in df.itertuples(index=False, name=None)
+        ]
 
+        # Insert into ClickHouse
         client.insert(ch_table, cleaned, column_names=REQUIRED_COLUMNS)
 
+        # Aggregate metadata
         for row in cleaned:
             d = dict(zip(REQUIRED_COLUMNS, row))
             div, sec, dept = d["lev1grpname"], d["lev2grpname"], d["grpname"]
@@ -120,16 +173,17 @@ try:
             for col in META_COLUMNS:
                 meta_counter[col][d[col]][div][sec][dept] += 1
 
-        percent = (total_rows / total_expected) * 100 if total_expected else 0
-        logging.info(f"Batch {batch_num} | Total {total_rows} ({percent:.2f}%)")
+        total_rows += len(cleaned)
+        logging.info(
+            f"Batch {batch_num+1}/{total_batches} | {total_rows} rows processed"
+        )
 
-    logging.info("Main load done")
+    logging.info("Main Oracle to ClickHouse load complete.")
 
-    # ----------------------------
-    # METADATA
-    # ----------------------------
-    logging.info("Building metadata")
-
+    # ------------------------------------------------
+    # 4) METADATA INSERT
+    # ------------------------------------------------
+    logging.info("Building metadata...")
     meta_data = []
 
     for col, val_dict in meta_counter.items():
@@ -144,7 +198,11 @@ try:
                             client.insert(
                                 meta_table,
                                 meta_data,
-                                column_names=["column_name", "value", "division", "section", "department", "count"]
+                                column_names=[
+                                    "column_name", "value",
+                                    "division", "section",
+                                    "department", "count"
+                                ]
                             )
                             meta_data = []
 
@@ -152,34 +210,39 @@ try:
         client.insert(
             meta_table,
             meta_data,
-            column_names=["column_name", "value", "division", "section", "department", "count"]
+            column_names=[
+                "column_name", "value",
+                "division", "section",
+                "department", "count"
+            ]
         )
 
-    logging.info("Metadata done")
+    logging.info("Metadata load completed.")
 
-    # ----------------------------
-    # FUZZY (STREAMING, SAFE)
-    # ----------------------------
-    logging.info("Fuzzy start")
+    # ------------------------------------------------
+    # 5) FUZZY MATCHING
+    # ------------------------------------------------
+    logging.info("Starting fuzzy matching...")
 
     for col in FUZZY_COLUMNS:
-        logging.info(f"Processing column: {col}")
+        logging.info(f"Processing fuzzy for column: {col}")
 
         value_map = defaultdict(int)
 
+        # Flatten counts
         for val, div_dict in meta_counter[col].items():
+            total = 0
             for d2 in div_dict.values():
                 for s2 in d2.values():
-                    for dept, cnt in s2.items():
-                        value_map[val] += cnt
+                    for cnt in s2.values():
+                        total += cnt
+            value_map[val] = total
 
         values = list(value_map.keys())
-
         if len(values) < 2:
             continue
 
         norm = [normalize(v) for v in values]
-
         total_pairs = 0
 
         for start in range(0, len(values), CHUNK_SIZE):
@@ -201,67 +264,43 @@ try:
 
                     if gi >= j:
                         continue
-
                     if score >= FUZZY_THRESHOLD:
                         v1 = chunk_vals[i]
                         v2 = values[j]
 
                         insert_batch.append([
                             col,
-                            v1,
-                            v2,
-                            normalize(v1),
-                            normalize(v2),
-                            score,
-                            value_map[v1],
-                            value_map[v2]
+                            v1, v2,
+                            normalize(v1), normalize(v2),
+                            score, value_map[v1], value_map[v2]
                         ])
 
                         if len(insert_batch) >= INSERT_BATCH_SIZE:
                             client.insert(
-                                fuzzy_table,
-                                insert_batch,
+                                fuzzy_table, insert_batch,
                                 column_names=[
                                     "column_name",
-                                    "value1",
-                                    "value2",
-                                    "normalized_value1",
-                                    "normalized_value2",
-                                    "score",
-                                    "count1",
-                                    "count2"
+                                    "value1", "value2",
+                                    "normalized_value1", "normalized_value2",
+                                    "score", "count1", "count2"
                                 ]
                             )
-                            total_pairs += len(insert_batch)
                             insert_batch = []
 
             if insert_batch:
                 client.insert(
-                    fuzzy_table,
-                    insert_batch,
+                    fuzzy_table, insert_batch,
                     column_names=[
                         "column_name",
-                        "value1",
-                        "value2",
-                        "normalized_value1",
-                        "normalized_value2",
-                        "score",
-                        "count1",
-                        "count2"
+                        "value1", "value2",
+                        "normalized_value1", "normalized_value2",
+                        "score", "count1", "count2"
                     ]
                 )
-                total_pairs += len(insert_batch)
 
-            logging.info(f"{col}: chunk {start} done | pairs: {total_pairs}")
+        logging.info(f"Completed fuzzy for column {col}")
 
-        del values, norm, value_map
-
-        logging.info(f"Completed {col} | total pairs: {total_pairs}")
-
-    logging.info("ETL COMPLETED SUCCESSFULLY")
-
-    cursor.close()
-    conn.close()
+    logging.info("ETL COMPLETED SUCCESSFULLY.")
 
 except Exception:
     logging.exception("ETL FAILED")

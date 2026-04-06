@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+
+# Virtual environment
+venv/
+.env
+.env.*
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker files (optional, only if not needed inside container)
+Dockerfile
+docker-compose.yml

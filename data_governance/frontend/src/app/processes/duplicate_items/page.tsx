@@ -32,9 +32,10 @@ export default function DuplicateItemsPage() {
         }
     }, []);
 
+    // Fix: exportAllDuplicateItems expects 0 arguments – remove appliedFilters
     const handleExportFull = useCallback(async () => {
-        await exportAllDuplicateItems(appliedFilters);
-    }, [appliedFilters]);
+        await exportAllDuplicateItems();
+    }, []);
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50/30 py-8 px-4 sm:px-6 lg:px-8">

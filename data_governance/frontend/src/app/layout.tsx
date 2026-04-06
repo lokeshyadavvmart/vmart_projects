@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DataScope - Duplicate Items Analysis",
+  title: "Data Governance - Duplicate Items Analysis",
   description: "Analyze and manage duplicate inventory records",
 };
 
