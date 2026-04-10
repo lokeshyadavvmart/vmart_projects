@@ -1,3 +1,5 @@
+DROP TABLE IF EXISTS governance.color_variants;
+
 CREATE TABLE IF NOT EXISTS governance.color_variants
 (
     group_id UInt64,
@@ -27,6 +29,8 @@ CREATE TABLE IF NOT EXISTS governance.color_variants
 
     fabric LowCardinality(String),
 
+    option LowCardinality(String),   -- << NEW COLUMN ADDED HERE
+
     udfstring01 String,
     udfstring02 String,
     udfstring03 String,
@@ -50,4 +54,3 @@ ORDER BY
     order_code
 )
 SETTINGS index_granularity = 8192;
-

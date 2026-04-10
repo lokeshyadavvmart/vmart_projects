@@ -1,3 +1,4 @@
+# D:\work\vmart_projects\data_governance\etl\processes\duplicate_item.py
 import logging
 import sys
 from datetime import datetime
@@ -11,6 +12,7 @@ from database.clickhouse_client import get_clickhouse_client
 NUM_DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 730  # Default: last 2 years
 ADMSITES = (101486, 101497)  # Site codes filter
 BATCH_SIZE = 5000
+IN_CHUNK = 900  # Safe chunk for Oracle IN clause
 
 # ----------------------------
 # Configure logging
@@ -25,11 +27,10 @@ logging.basicConfig(
 )
 
 # ----------------------------
-# Fetch duplicate items from Oracle
+# STEP 1: Fetch duplicate items from Oracle
 # ----------------------------
 def fetch_duplicate_items(num_days: int, admsites: tuple) -> pd.DataFrame:
-    """Fetch duplicate items from Oracle with grouping logic, including po_number."""
-    logging.info(f"Fetching concern groups from Oracle for last {num_days} days.")
+    logging.info(f"Fetching duplicate item groups from Oracle for last {num_days} days.")
     try:
         query = f"""
         WITH base_data AS (
@@ -90,8 +91,8 @@ def fetch_duplicate_items(num_days: int, admsites: tuple) -> pd.DataFrame:
         WHERE item_count > 1
         ORDER BY group_id, icode
         """
-        result = execute_query_dict(query)
-        df = pd.DataFrame(result)
+        rows = execute_query_dict(query)
+        df = pd.DataFrame(rows)
         df.columns = [c.lower() for c in df.columns]
 
         # Rename columns to match ClickHouse
@@ -112,38 +113,73 @@ def fetch_duplicate_items(num_days: int, admsites: tuple) -> pd.DataFrame:
         raise
 
 # ----------------------------
-# Export to CSV
+# STEP 2: Fetch desc5 as 'option'
 # ----------------------------
-def export_to_csv(df: pd.DataFrame, num_days: int) -> str:
-    """Export DataFrame to CSV for debugging."""
-    try:
-        file_name = f"duplicate_items_last_{num_days}_days.csv"
-        df.to_csv(file_name, index=False)
-        logging.info(f"CSV written successfully: {file_name}")
-        return file_name
-    except Exception:
-        logging.exception("Error exporting CSV.")
-        raise
+def fetch_desc5_map(icode_list: list) -> dict:
+    """Fetch desc5 for given icodes from Oracle safely, returns {icode: desc5}."""
+    if not icode_list:
+        return {}
+
+    logging.info("Fetching desc5 for icodes safely...")
+    result_rows = []
+
+    for i in range(0, len(icode_list), IN_CHUNK):
+        chunk = icode_list[i:i + IN_CHUNK]
+        placeholders = ",".join([f":{n+1}" for n in range(len(chunk))])
+        query = f"""
+            SELECT icode, desc5
+            FROM V_item
+            WHERE icode IN ({placeholders})
+        """
+        rows = execute_query_dict(query, params=chunk)
+        result_rows.extend(rows)
+
+    df_desc5 = pd.DataFrame(result_rows)
+    df_desc5.columns = [c.lower() for c in df_desc5.columns]
+    df_desc5 = df_desc5.drop_duplicates(subset=['icode'])  # enforce one desc5 per icode
+
+    logging.info(f"Fetched desc5 for {len(df_desc5)} unique icodes.")
+    return dict(zip(df_desc5['icode'], df_desc5['desc5']))
 
 # ----------------------------
-# Insert into ClickHouse
+# STEP 3: Export CSV (debug)
+# ----------------------------
+def export_to_csv(df: pd.DataFrame, num_days: int) -> str:
+    file_name = f"duplicate_items_last_{num_days}_days.csv"
+    df.to_csv(file_name, index=False)
+    logging.info(f"CSV written successfully: {file_name}")
+    return file_name
+
+# ----------------------------
+# STEP 4: Insert into ClickHouse (truncate table first)
 # ----------------------------
 def insert_into_clickhouse(df: pd.DataFrame, table_name: str = "governance.duplicate_items"):
-    """Insert DataFrame into ClickHouse in batches."""
     try:
-        logging.info("Connecting to ClickHouse...")
         client = get_clickhouse_client()
+
+        # ----------------------------
+        # Truncate table to replace old data
+        # ----------------------------
+        logging.info(f"Truncating ClickHouse table {table_name} before insert...")
+        client.query(f"TRUNCATE TABLE {table_name}")
+
+        # ----------------------------
+        # Get ClickHouse schema
+        # ----------------------------
         ch_columns_result = client.query(f"DESCRIBE TABLE {table_name}")
         ch_column_types = {row[0]: row[1] for row in ch_columns_result.result_rows}
         ch_columns = list(ch_column_types.keys())
 
+        # ----------------------------
         # Add missing columns
+        # ----------------------------
         for col in ch_columns:
             if col not in df.columns:
-                logging.warning(f"Column '{col}' missing in DataFrame. Adding empty column.")
                 df[col] = None
 
+        # ----------------------------
         # Type conversion
+        # ----------------------------
         for col in ch_columns:
             if col in df.columns:
                 ch_type = ch_column_types[col]
@@ -157,7 +193,9 @@ def insert_into_clickhouse(df: pd.DataFrame, table_name: str = "governance.dupli
 
         df = df.reindex(columns=ch_columns).where(pd.notnull(df), None)
 
+        # ----------------------------
         # Insert in batches
+        # ----------------------------
         data_to_insert = df.values.tolist()
         total_batches = (len(data_to_insert) + BATCH_SIZE - 1) // BATCH_SIZE
 
@@ -167,30 +205,38 @@ def insert_into_clickhouse(df: pd.DataFrame, table_name: str = "governance.dupli
             logging.info(f"Inserted batch {i+1}/{total_batches} ({len(batch)} records)")
 
         logging.info(f"Successfully inserted {len(df)} records into {table_name}")
+
     except Exception:
         logging.exception("Error inserting into ClickHouse.")
         raise
 
 # ----------------------------
-# Main ETL
+# MAIN ETL
 # ----------------------------
 def main():
-    logging.info("Starting Case-2 Duplicate Items ETL process.")
+    logging.info("Starting Duplicate Items ETL process.")
     try:
+        # Fetch duplicate items
         df = fetch_duplicate_items(NUM_DAYS, ADMSITES)
         if df.empty:
             logging.warning("No duplicate items found for the given period.")
             return
 
-        # CSV export for debugging
+        # Fetch desc5 → option
+        icode_list = df["icode"].unique().tolist()
+        desc5_map = fetch_desc5_map(icode_list)
+        df["option"] = df["icode"].map(desc5_map)
+
+        # Debug CSV
         export_to_csv(df, NUM_DAYS)
 
-        # Insert into ClickHouse
+        # Insert into ClickHouse (truncate first)
         insert_into_clickhouse(df)
 
-        logging.info("Case-2 ETL process completed successfully.")
+        logging.info("Duplicate Items ETL completed successfully.")
+
     except Exception:
-        logging.exception("Case-2 ETL process failed.")
+        logging.exception("Duplicate Items ETL failed.")
 
 if __name__ == "__main__":
     main()

@@ -16,6 +16,10 @@ interface FetchResult {
     distinct_values: Record<string, (string | number)[]>;
 }
 
+/**
+ * Updated to include 'option' so that filters sent to the backend 
+ * don't get stripped out, and internal mapping remains consistent.
+ */
 const ALLOWED_FILTER_KEYS = new Set([
     'site_code',
     'icode',
@@ -32,6 +36,7 @@ const ALLOWED_FILTER_KEYS = new Set([
     'cat4',
     'cat5',
     'cat6',
+    'option', // Added to support the new VM Code column
 ]);
 
 function buildPayload(raw: QueryPayload): Record<string, any> {
@@ -81,12 +86,26 @@ export async function fetchSameStyleDiffDesign(
 
         const parsed = sameStyleDiffDesignResponseSchema.parse(response);
 
+        /**
+         * The backend MUST return 'columns' in the same order as the 'data' array elements.
+         * If 'option' is showing 'ROUND NECK', the backend is likely sending 'option' 
+         * in the column list but the 'udfstring01' value in that data index.
+         */
         const data: SameStyleDiffDesignRow[] = parsed.data.map((row) =>
             parsed.columns.reduce((acc, col, idx) => {
                 acc[col] = row[idx];
                 return acc;
             }, {} as SameStyleDiffDesignRow)
         );
+
+        // Debugging logs to verify alignment in the console
+        if (data.length > 0) {
+            console.log('✅ First Row Mapped:', {
+                cat6: data[0].cat6,
+                option: data[0].option,
+                udf01: data[0].udfstring01
+            });
+        }
 
         return {
             data,

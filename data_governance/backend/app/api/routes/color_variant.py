@@ -1,3 +1,4 @@
+#D:\work\vmart_projects\data_governance\backend\app\api\routes\color_variant.py
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from io import StringIO

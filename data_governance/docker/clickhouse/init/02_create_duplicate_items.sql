@@ -1,14 +1,14 @@
 -- Drop the old table if it exists
 DROP TABLE IF EXISTS governance.duplicate_items;
 
--- Create the new table with po_number
+-- Create the new table with `option`
 CREATE TABLE IF NOT EXISTS governance.duplicate_items
 (
     group_id UInt64,
 
     site_code UInt32,
     icode String,
-    po_number String,        -- Added PO number
+    po_number String,
     mrp String,
 
     order_date Date,
@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS governance.duplicate_items
     itemdesc1 LowCardinality(String),
     itemdesc3 LowCardinality(String),
     itemdesc6 LowCardinality(String),
+
+    option LowCardinality(String),   -- << NEW COLUMN ADDED HERE (same as color_variants)
 
     udfstring01 String,
     udfstring02 String,

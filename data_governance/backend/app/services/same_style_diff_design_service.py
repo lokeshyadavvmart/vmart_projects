@@ -1,3 +1,4 @@
+# D:\work\vmart_projects\data_governance\backend\app\services\same_style_diff_design_service.py
 from datetime import datetime
 from typing import Optional, Dict, Set, Any
 from app.repositories.same_style_diff_design_repo import fetch_same_style_diff_design
@@ -5,14 +6,13 @@ from app.core.database import get_client
 
 client = get_client()
 
-# ✅ Allowed filter columns
+# Added 'option' to allowed filters
 ALLOWED_FILTERS = {
     "site_code", "icode", "po_number", "design_no", "color_or_style",
     "vendor", "division", "section", "department",
-    "cat1", "cat2", "cat3", "cat4", "cat5", "cat6"
+    "cat1", "cat2", "cat3", "cat4", "cat5", "cat6", "option"
 }
 
-# Columns for which we want distinct values
 DISTINCT_KEYS = ["site_code", "division", "section", "department", "vendor", "color_or_style"]
 
 def is_valid_date(date_str: Optional[str]) -> bool:
@@ -47,9 +47,6 @@ def build_filter_condition(key: str, value: Any) -> Optional[str]:
         return f"{key} ILIKE '%{value}%'"
     return f"{key} = '{value}'"
 
-# -----------------------------
-# Fetch all distinct values at first request
-# -----------------------------
 def fetch_all_distinct_values() -> Dict[str, Set[str]]:
     distincts: Dict[str, Set[str]] = {}
     for col in DISTINCT_KEYS:
@@ -58,13 +55,9 @@ def fetch_all_distinct_values() -> Dict[str, Set[str]]:
         distincts[col] = set([row[0] for row in result.result_rows if row[0]])
     return distincts
 
-# -----------------------------
-# Main service function
-# -----------------------------
 def get_same_style_diff_design(params, previous_distincts: Optional[Dict[str, Set[str]]] = None) -> Dict[str, Any]:
     conditions = ["1 = 1"]
 
-    # ✅ DATE FILTER
     if getattr(params, "date_range", None):
         from_date = getattr(params.date_range, "from_date", None)
         to_date = getattr(params.date_range, "to_date", None)
@@ -73,7 +66,6 @@ def get_same_style_diff_design(params, previous_distincts: Optional[Dict[str, Se
         if is_valid_date(to_date):
             conditions.append(f"order_date <= toDate('{to_date}')")
 
-    # ✅ DYNAMIC FILTERS
     filters = getattr(params, "filters", None)
     if filters:
         for key, value in filters.items():
@@ -83,7 +75,6 @@ def get_same_style_diff_design(params, previous_distincts: Optional[Dict[str, Se
             if condition:
                 conditions.append(condition)
 
-    # ✅ CURSOR (INFINITE SCROLL)
     cursor = getattr(params, "cursor", None)
     if cursor and cursor != "string":
         if is_valid_date(cursor):
@@ -91,23 +82,20 @@ def get_same_style_diff_design(params, previous_distincts: Optional[Dict[str, Se
 
     where_clause = " AND ".join(conditions)
 
-    # DEBUG
-    print("\nGenerated WHERE CLAUSE:\n", where_clause, "\n")
-
-    # ✅ FETCH DATA + COLUMNS
     limit = getattr(params, "limit", 100)
+    # rows and columns are now guaranteed to be in the same order
     rows, columns = fetch_same_style_diff_design(where_clause, limit, return_columns=True)
 
-    # ✅ NEXT CURSOR
     next_cursor = None
     if rows:
         last_row = rows[-1]
         try:
-            next_cursor = str(last_row[6])  # order_date index
-        except Exception:
+            # Dynamic index lookup for safety
+            date_idx = columns.index("order_date")
+            next_cursor = str(last_row[date_idx])
+        except (Exception, ValueError):
             next_cursor = None
 
-    # ✅ DYNAMIC DISTINCT VALUES
     if previous_distincts is None:
         distincts: Dict[str, Set[str]] = fetch_all_distinct_values()
     else:
@@ -132,9 +120,6 @@ def get_same_style_diff_design(params, previous_distincts: Optional[Dict[str, Se
         "distinct_values": distincts_out
     }
 
-# -----------------------------
-# Full export
-# -----------------------------
 def get_full_same_style_diff_design(filters: Optional[Dict[str, Any]] = None):
     conditions = ["1 = 1"]
     if filters:

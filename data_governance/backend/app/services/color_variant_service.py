@@ -1,3 +1,4 @@
+# D:\work\vmart_projects\data_governance\backend\app\services\color_variant_service.py
 from datetime import datetime
 from typing import Optional, Dict, Set, Any
 from app.repositories.color_variant_repo import fetch_color_variants
@@ -5,12 +6,14 @@ from app.core.database import get_client
 
 client = get_client()
 
-# ✅ Allowed filter columns
+# ✅ Expanded Allowed filter columns to match grid columns
 ALLOWED_FILTERS = {
-    "site_code", "icode", "po_number", "order_code",
-    "vendor", "division", "section", "department",
-    "cat1", "cat2", "cat3", "cat4", "cat5", "cat6",
-    "fabric"
+    "group_id", "site_code", "order_code", "po_number", "icode",
+    "po_count", "order_date", "last_delivery_date", "vendor",
+    "division", "section", "department", "cat1", "cat2", "cat3",
+    "cat4", "cat5", "cat6", "fabric", "option",
+    "udfstring01", "udfstring02", "udfstring03", "udfstring04", "udfstring05",
+    "udfstring06", "udfstring07", "udfstring08", "udfstring09", "udfstring10"
 }
 
 # Columns for which we want distinct values
@@ -34,6 +37,22 @@ def clean_value(value: Any) -> Optional[str]:
     return value.replace("'", "''")
 
 def build_filter_condition(key: str, value: Any) -> Optional[str]:
+    # ✅ 1. Handle AG Grid Filter Objects (from infinite scroll)
+    if isinstance(value, dict) and "filter" in value:
+        filter_text = clean_value(value.get("filter"))
+        filter_type = value.get("type")
+        
+        if not filter_text:
+            return None
+            
+        if filter_type == "equals":
+            return f"{key} = '{filter_text}'"
+        elif filter_type == "startsWith":
+            return f"{key} ILIKE '{filter_text}%'"
+        # Default to contains
+        return f"{key} ILIKE '%{filter_text}%'"
+
+    # ✅ 2. Handle List (existing logic for multi-selects)
     if isinstance(value, list):
         cleaned = [clean_value(v) for v in value if clean_value(v)]
         if not cleaned:
@@ -41,6 +60,7 @@ def build_filter_condition(key: str, value: Any) -> Optional[str]:
         values_str = ", ".join([f"'{v}'" for v in cleaned])
         return f"{key} IN ({values_str})"
 
+    # ✅ 3. Handle Simple String (existing logic)
     value = clean_value(value)
     if not value:
         return None
@@ -74,7 +94,7 @@ def get_color_variants(params, previous_distincts: Optional[Dict[str, Set[str]]]
         if is_valid_date(to_date):
             conditions.append(f"order_date <= toDate('{to_date}')")
 
-    # ✅ DYNAMIC FILTERS
+    # ✅ DYNAMIC FILTERS (Includes AG Grid column filters)
     filters = getattr(params, "filters", None)
     if filters:
         for key, value in filters.items():
@@ -104,7 +124,8 @@ def get_color_variants(params, previous_distincts: Optional[Dict[str, Set[str]]]
     if rows:
         last_row = rows[-1]
         try:
-            next_cursor = str(last_row[6])  # order_date index
+            # We assume order_date is at index 6 based on your repo SELECT
+            next_cursor = str(last_row[6])
         except Exception:
             next_cursor = None
 
@@ -118,7 +139,7 @@ def get_color_variants(params, previous_distincts: Optional[Dict[str, Set[str]]]
     for row in rows:
         for key in DISTINCT_KEYS:
             idx = key_index_map.get(key)
-            if idx is not None:
+            if idx is not None and idx < len(row):
                 val = row[idx]
                 if val:
                     distincts.setdefault(key, set()).add(val)

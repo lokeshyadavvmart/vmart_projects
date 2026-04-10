@@ -1,3 +1,4 @@
+#D:\work\vmart_projects\data_governance\backend\app\repositories\color_variant_repo.py
 from app.core.database import get_client
 
 client = get_client()
@@ -5,6 +6,7 @@ client = get_client()
 def fetch_color_variants(where_clause: str, limit: int, return_columns: bool = False):
     """
     Fetch rows from ClickHouse color_variants table.
+    Includes new column: option
     """
     query = f"""
     SELECT
@@ -20,10 +22,24 @@ def fetch_color_variants(where_clause: str, limit: int, return_columns: bool = F
         division,
         section,
         department,
-        cat1, cat2, cat3, cat4, cat5, cat6,
+        cat1,
+        cat2,
+        cat3,
+        cat4,
+        cat5,
+        cat6,
         fabric,
-        udfstring01, udfstring02, udfstring03, udfstring04, udfstring05,
-        udfstring06, udfstring07, udfstring08, udfstring09, udfstring10
+        option,               -- << ADDED NEW COLUMN HERE
+        udfstring01,
+        udfstring02,
+        udfstring03,
+        udfstring04,
+        udfstring05,
+        udfstring06,
+        udfstring07,
+        udfstring08,
+        udfstring09,
+        udfstring10
     FROM governance.color_variants
     WHERE {where_clause}
     ORDER BY order_date DESC
